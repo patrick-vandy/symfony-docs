@@ -1,11 +1,20 @@
 How to Create Your own Messenger Transport
 ==========================================
 
-Once you have written your transport's sender and receiver, you can register your
-transport factory to be able to use it via a DSN in the Symfony application.
+A transport a combines a sender (:class:`Symfony\\Component\\Messenger\\Transport\\Sender\\SenderInterface`)
+and receiver (:class:`Symfony\\Component\\Messenger\\Transport\\Receiver\\ReceiverInterface`) to provide
+an interface for sending and handling *(receive, acknowledge, get)* messages with a persistence layer. The
+sender and recevier logic can be implemented directly in a transport class, or as separate classes used by
+the transport class.
 
-Create your Transport Factory
------------------------------
+In Symfony applications, each transport has a corresponding transport factory to enable using the transport
+via a DSN. The transport factories implement a supports method and form a Chain of Responsiblity, which is
+use to choose a factory for a given DSN. Once you have written your transport's sender and receiver logic,
+you can register your transport factory to use your transport via a DSN in the ``framework.messenger.transports.*``
+configuration.
+
+Create your Transport Factory and Transport
+-------------------------------------------
 
 You need to give FrameworkBundle the opportunity to create your transport from a
 DSN. You will need a transport factory::
@@ -169,6 +178,88 @@ Otherwise, add the following:
 
         $container->register(YourTransportFactory::class)
             ->setTags(['messenger.transport_factory']);
+
+Transport Factory Priority
+--------------------------
+
+You may wish to extend the functionality of an existing transport by decorating it.
+First, decorate the existing transport and its factory:
+
+Set a priority when registering:
+
+.. configuration-block::
+
+    .. code-block:: yaml
+
+        # config/services.yaml
+        services:
+            Your\Transport\YourTransportFactory:
+                tags:
+                    - { name: messenger.transport_factory, priority: 100 }
+
+You can also set a priority using the `#[AsTaggedItem]` attribute or by implementing
+`getDefaultPriority()` in the transport handler class.
+
+Decorate a Transport
+
+Example of a decorated transport to audit dispatch failures::
+
+    class AuditFailureTransport implements TransportInterface
+    {
+        public function __construct(private TransportInterface $decoratedTransport, private string $transportName)
+        {
+        }
+        public function get(): iterable
+        {
+            return $this->decoratedTransport->get();
+        }
+
+        public function ack(Envelope $envelope): void
+        {
+            $this->decoratedTransport->ack($envelope);
+        }
+
+        public function reject(Envelope $envelope): void
+        {
+            $this->decoratedTransport->reject($envelope);
+        }
+
+        public function send(Envelope $envelope): Envelope
+        {
+            try {
+                return $this->decoratedTransport->send($envelope);
+            } catch (TransportException $exception) {
+                // do some custom auditing, etc.
+                throw new FailedDispatchException("Sending to transport $this->transportName failed", 0, $exception);
+            }
+        }
+    }
+
+Now decorate the transport factory and set a priority greater than 0 so
+this factory will be chosen before the existing one::
+
+    #[AsTaggedItem(index: 'messenger.transport_factory', priority: 100)]
+    class AuditFailureTransportFactory implements TransportFactoryInterface
+    {
+        public function __construct(
+            #[Autowire(service: 'messenger.transport.amqp.factory')]
+            private AmqpTransportFactory $decoratedFactory
+        ) {
+        }
+
+        public function createTransport(#[SensitiveParameter] string $dsn, array $options, SerializerInterface $serializer): TransportInterface
+        {
+            return new AuditableAmqpTransport(
+                $this->decoratedFactory->createTransport($dsn, $options, $serializer),
+                $options['transport_name']
+            );
+        }
+
+        public function supports(#[SensitiveParameter] string $dsn, array $options): bool
+        {
+            return $this->decoratedFactory->supports($dsn, $options);
+        }
+    }
 
 Use your Transport
 ------------------
